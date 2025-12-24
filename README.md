@@ -14,6 +14,10 @@
 
 考虑到大多数wmls并不是技术出身，因此开源后可以直接挂载访问或者自己按步骤本地开服务运行。此工具只作为个人兴趣爱好和学习使用，勿商业化哦~
 
+演示地址如下，俩个地址都一样，国内访问可能会加载不出来或者比较慢（建议本地运行），需要等到获取摄像头权限后才可以进行操作：
+[Cloudflare托管](https://8264a158.wmls-play.pages.dev/index.html)
+[github托管](https://chrisetong.github.io/wmls-play/index.html)
+
 ## 二、使用前需要准备什么？
 
 ### 1. 设备要求
