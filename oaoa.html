@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini 3 x Mayday - LOVE Edition</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Tinos:ital@0;1&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-color: #050505;
+            --gold-color: #D4AF37;
+        }
+        body { margin: 0; overflow: hidden; background-color: var(--bg-color); font-family: 'Tinos', serif; user-select: none; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        #webcam-wrapper { position: absolute; bottom: 30px; left: 30px; pointer-events: auto; }
+        #webcam-container { width: 160px; height: 120px; border: 1px solid rgba(212, 175, 55, 0.2); border-radius: 4px; overflow: hidden; background: #000; margin-bottom: 8px; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        #webcam-wrapper.hidden #webcam-container { height: 0; opacity: 0; margin-bottom: 0; border: none; }
+        video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .cam-toggle-btn { font-family: 'Cinzel', serif; color: #888; font-size: 10px; background: transparent; border: 1px solid rgba(100,100,100,0.3); padding: 5px 15px; cursor: pointer; letter-spacing: 1px; transition: all 0.3s; width: 160px; }
+        .cam-toggle-btn:hover { color: var(--gold-color); border-color: var(--gold-color); }
+        #loader { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--gold-color); font-family: 'Cinzel', serif; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <div id="loader">LOADING VISION ENGINE...</div>
+
+    <div id="ui-layer">
+        <div id="webcam-wrapper">
+            <div id="webcam-container">
+                <video id="webcam" autoplay playsinline></video>
+            </div>
+            <button class="cam-toggle-btn" id="toggle-cam">HIDE CAMERA</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from './libs/three.module.js';
+        import { FilesetResolver, HandLandmarker } from './libs/tasks-vision.js';
+
+        const CONFIG = {
+            particleCount: 35000, 
+            particleSize: 0.35,
+            color: 0xD4AF37,
+            lerpSpeed: 0.08, // 保持原有的平滑速度
+            cameraZ: 40,
+            colorBoost: 1.0 
+        };
+
+        let scene, camera, renderer, particles, geometry;
+        let snowSystem, snowGeo, bgStarSystem; // 雪花系统 & 背景星空
+        let handLandmarker, webcam;
+        let currentPositions = [];
+        let targetPositions = [];
+        let currentColors = [];
+        let targetColors = [];
+        let lastGesture = "";
+        let targetGroupY = 0; // 粒子组整体垂直位移目标
+        let targetGroupX = 0; // 粒子组整体水平位移目标
+
+        // UI
+        const toggleBtn = document.getElementById('toggle-cam');
+        const camWrapper = document.getElementById('webcam-wrapper');
+        toggleBtn.onclick = () => {
+            const isHidden = camWrapper.classList.toggle('hidden');
+            toggleBtn.innerText = isHidden ? "SHOW CAMERA" : "HIDE CAMERA";
+        };
+
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = CONFIG.cameraZ;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            createParticleSystem();
+            createSnowSystem(); // 初始化雪花
+            updateShape('BOBO');
+
+            window.onresize = () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            };
+        }
+
+        function createParticleSystem() {
+            geometry = new THREE.BufferGeometry();
+            const posArray = new Float32Array(CONFIG.particleCount * 3);
+            const colArray = new Float32Array(CONFIG.particleCount * 3);
+            const defaultColor = new THREE.Color(CONFIG.color);
+
+            for (let i = 0; i < CONFIG.particleCount * 3; i+=3) {
+                posArray[i] = (Math.random() - 0.5) * 100;
+                posArray[i+1] = (Math.random() - 0.5) * 100;
+                posArray[i+2] = (Math.random() - 0.5) * 100;
+                currentPositions[i] = posArray[i];
+                currentPositions[i+1] = posArray[i+1];
+                currentPositions[i+2] = posArray[i+2];
+                colArray[i] = defaultColor.r; colArray[i+1] = defaultColor.g; colArray[i+2] = defaultColor.b;
+                currentColors[i] = defaultColor.r; currentColors[i+1] = defaultColor.g; currentColors[i+2] = defaultColor.b;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(0.6, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+
+            const material = new THREE.PointsMaterial({
+                color: 0xffffff, vertexColors: true, size: CONFIG.particleSize,
+                map: new THREE.CanvasTexture(canvas), transparent: true,
+                blending: THREE.NormalBlending, depthWrite: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+            targetPositions = new Float32Array(CONFIG.particleCount * 3);
+            targetColors = new Float32Array(CONFIG.particleCount * 3);
+        }
+
+        function createSnowSystem() {
+            // 1. 银河系背景 (Galaxy Sky) - 营造深邃梦幻的星空
+            const starCount = 2000;
+            const starGeo = new THREE.BufferGeometry();
+            const starPos = new Float32Array(starCount * 3);
+            const starColors = new Float32Array(starCount * 3);
+
+            // 银河系配色：深蓝、紫、粉、白
+            const c1 = new THREE.Color(0x1b3984); // 深蓝
+            const c2 = new THREE.Color(0x6a0dad); // 紫色
+            const c3 = new THREE.Color(0xff69b4); // 粉色
+            const c4 = new THREE.Color(0xffffff); // 亮白
+
+            for(let i=0; i<starCount; i++) {
+                const idx = i * 3;
+                
+                // 随机分布在广阔背景
+                const x = (Math.random() - 0.5) * 450;
+                const y = (Math.random() - 0.5) * 350;
+                const z = (Math.random() - 0.5) * 100 - 80; // 放在较远处
+
+                starPos[idx] = x;
+                starPos[idx+1] = y;
+                starPos[idx+2] = z;
+
+                // 银河带逻辑：越靠近对角线 (y = 0.4x) 颜色越丰富，星星越亮
+                const distToBand = Math.abs(y - 0.4 * x) / 180; // 归一化距离
+                
+                let color = new THREE.Color();
+                const rnd = Math.random();
+
+                if (rnd > distToBand) {
+                    // 银河带内部：色彩丰富
+                    const mix = Math.random();
+                    if (mix > 0.8) color.copy(c4); // 20% 亮白星
+                    else if (mix > 0.5) color.copy(c3).lerp(c2, Math.random()); // 粉紫渐变
+                    else color.copy(c1).lerp(c2, Math.random()); // 蓝紫渐变
+                } else {
+                    // 银河带外部：深邃稀疏
+                    color.copy(c1).multiplyScalar(0.5); // 暗淡蓝
+                }
+
+                starColors[idx] = color.r;
+                starColors[idx+1] = color.g;
+                starColors[idx+2] = color.b;
+            }
+            starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+            starGeo.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
+            
+            const starCanvas = document.createElement('canvas');
+            starCanvas.width = 16; starCanvas.height = 16;
+            const sCtx = starCanvas.getContext('2d');
+            const sGrad = sCtx.createRadialGradient(8,8,0, 8,8,8);
+            sGrad.addColorStop(0, 'rgba(255,255,255,1)');
+            sGrad.addColorStop(0.5, 'rgba(255,255,255,0.5)');
+            sGrad.addColorStop(1, 'rgba(255,255,255,0)');
+            sCtx.fillStyle = sGrad; sCtx.fillRect(0,0,16,16);
+
+            const starMat = new THREE.PointsMaterial({
+                vertexColors: true, // 启用顶点颜色
+                size: 1.2, 
+                map: new THREE.CanvasTexture(starCanvas),
+                transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            bgStarSystem = new THREE.Points(starGeo, starMat);
+            scene.add(bgStarSystem);
+
+            // 2. 漫天雪花 (Falling Snowflakes) - 使用雪花纹理
+            const snowCount = 600;
+            snowGeo = new THREE.BufferGeometry();
+            const posArray = new Float32Array(snowCount * 3);
+            const speedArray = new Float32Array(snowCount); // 个体下落速度
+            
+            for (let i = 0; i < snowCount; i++) {
+                const idx = i * 3;
+                posArray[idx] = (Math.random() - 0.5) * 250; 
+                posArray[idx+1] = (Math.random() - 0.5) * 150; 
+                posArray[idx+2] = (Math.random() - 0.5) * 60 + 10; // 较近
+                speedArray[i] = Math.random() * 0.1 + 0.05;
+            }
+            snowGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            snowGeo.setAttribute('velocity', new THREE.BufferAttribute(speedArray, 1));
+
+            // 绘制六角雪花纹理
+            const snowCanvas = document.createElement('canvas');
+            snowCanvas.width = 32; snowCanvas.height = 32;
+            const ctx = snowCanvas.getContext('2d');
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.translate(16, 16);
+            for(let k=0; k<3; k++) {
+                ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(0, 10); ctx.stroke();
+                ctx.rotate(Math.PI/3);
+            }
+            // 中心加点光晕
+            ctx.fillStyle = '#FFFFFF';
+            ctx.beginPath(); ctx.arc(0,0, 2, 0, Math.PI*2); ctx.fill();
+
+            const snowMat = new THREE.PointsMaterial({
+                color: 0xffffff, size: 1.5, 
+                map: new THREE.CanvasTexture(snowCanvas), 
+                transparent: true, opacity: 0.9, 
+                blending: THREE.AdditiveBlending, depthWrite: false
+            });
+
+            snowSystem = new THREE.Points(snowGeo, snowMat);
+            scene.add(snowSystem);
+        }
+
+        function generatePoints(type) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            const size = 600;
+            canvas.width = size; canvas.height = size;
+            ctx.clearRect(0, 0, size, size);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+            if (['L', 'O', 'V', 'E', '1', '2', '3'].includes(type)) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 380px "Cinzel"';
+                ctx.fillText(type, size/2, size/2 + 40);
+            } else if (type === 'OAOA') {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 160px "Cinzel"';
+                ctx.fillText('OAOA', size/2, size/2 + 20);
+            } else if (type === 'BOBO') {
+                // 完全还原 BOBO 的绘制逻辑
+                const cx = size/2; const cy = size/2 + 60; 
+                ctx.fillStyle = '#F35608';
+                ctx.beginPath(); ctx.ellipse(cx, cy, 180, 160, 0, 0, Math.PI*2); ctx.fill();
+                const drawLeaf = (x, y, r, s) => {
+                    ctx.save(); ctx.translate(x, y); ctx.rotate(r); ctx.scale(s, s);
+                    ctx.beginPath(); ctx.moveTo(0,0);
+                    ctx.bezierCurveTo(-35,-45, -45,-110, 0,-150); ctx.bezierCurveTo(45,-110, 35,-45, 0,0);
+                    ctx.fillStyle = '#66D033'; ctx.fill(); ctx.restore();
+                };
+                const leafBaseY = cy - 155;
+                drawLeaf(cx, leafBaseY, 0, 1.2); drawLeaf(cx-12, leafBaseY+6, -0.65, 1.05); drawLeaf(cx+12, leafBaseY+6, 0.65, 1.05);
+                const eyeY = cy - 20;
+                ctx.fillStyle = '#FFFFFF';
+                ctx.beginPath(); ctx.ellipse(cx-55, eyeY, 38, 48, 0, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(cx+55, eyeY, 38, 48, 0, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#2778D4';
+                const drawPupil = (ex) => {
+                    ctx.save(); ctx.translate(ex, eyeY+4); ctx.beginPath(); ctx.moveTo(0, -26);
+                    ctx.bezierCurveTo(16, -20, 16, 8, 0, 26); ctx.bezierCurveTo(-16, 8, -16, -20, 0, -26);
+                    ctx.fill(); ctx.restore();
+                };
+                drawPupil(cx-42); drawPupil(cx+42);
+                ctx.strokeStyle = '#000000'; ctx.lineWidth = 14; ctx.lineCap = 'round';
+                ctx.beginPath(); ctx.moveTo(cx-45, cy+62); ctx.quadraticCurveTo(cx-22, cy+92, cx, cy+62);
+                ctx.quadraticCurveTo(cx+22, cy+92, cx+45, cy+62); ctx.stroke();
+            }
+
+            const imgData = ctx.getImageData(0, 0, size, size).data;
+            const pts = [];
+            const step = 3; 
+            for (let y=0; y<size; y+=step) {
+                for (let x=0; x<size; x+=step) {
+                    const idx = (y*size+x)*4;
+                    if (imgData[idx+3] > 128) {
+                        pts.push({ x: (x-size/2)*0.1, y: -(y-size/2)*0.1, r: imgData[idx]/255, g: imgData[idx+1]/255, b: imgData[idx+2]/255 });
+                    }
+                }
+            }
+            return pts;
+        }
+
+        function updateShape(type) {
+            const pts = (type === 'SCATTER') ? [] : generatePoints(type);
+            const defaultColor = new THREE.Color(CONFIG.color);
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const idx = i * 3;
+                
+                // OAOA模式下：保留一部分粒子作为背景星空 (例如每3个粒子取1个做背景)
+                let isLoveBg = (type === 'OAOA' && i % 3 === 0);
+
+                if (pts.length === 0 || isLoveBg) {
+                    if (type === 'OAOA') {
+                        // 全屏星空特效
+                        targetPositions[idx] = (Math.random() - 0.5) * 200; // 宽
+                        targetPositions[idx+1] = (Math.random() - 0.5) * 120; // 高
+                        targetPositions[idx+2] = (Math.random() - 0.5) * 100 - 20; // 略微靠后
+                        // 星星闪烁白/金色
+                        const shade = Math.random() * 0.5 + 0.5;
+                        targetColors[idx] = shade; targetColors[idx+1] = shade; targetColors[idx+2] = shade;
+                    } else {
+                        const r = 35 * Math.cbrt(Math.random());
+                        const theta = Math.random() * 6.28, phi = Math.acos(2*Math.random()-1);
+                        targetPositions[idx] = r * Math.sin(phi) * Math.cos(theta);
+                        targetPositions[idx+1] = r * Math.sin(phi) * Math.sin(theta);
+                        targetPositions[idx+2] = r * Math.cos(phi);
+                        
+                        if (type === 'SCATTER') {
+                            // 五指张开：大部分保留原色，少部分五颜六色
+                            if (Math.random() > 0.8) { // 20% 概率变彩色
+                                const color = new THREE.Color();
+                                color.setHSL(Math.random(), 1.0, 0.6); // 随机色相，高饱和度，中等亮度
+                                targetColors[idx] = color.r; 
+                                targetColors[idx+1] = color.g; 
+                                targetColors[idx+2] = color.b;
+                            } else {
+                                targetColors[idx] = defaultColor.r; 
+                                targetColors[idx+1] = defaultColor.g; 
+                                targetColors[idx+2] = defaultColor.b;
+                            }
+                        } else {
+                            targetColors[idx] = defaultColor.r; 
+                            targetColors[idx+1] = defaultColor.g; 
+                            targetColors[idx+2] = defaultColor.b;
+                        }
+                    }
+                } else {
+                    const p = pts[i % pts.length];
+                    targetPositions[idx] = p.x + (Math.random()-0.5)*0.2;
+                    targetPositions[idx+1] = p.y + (Math.random()-0.5)*0.2;
+                    if (type === 'BOBO') {
+                        targetColors[idx] = p.r; targetColors[idx+1] = p.g; targetColors[idx+2] = p.b;
+                        targetPositions[idx+2] = 0;
+                    } else {
+                        targetColors[idx] = defaultColor.r; targetColors[idx+1] = defaultColor.g; targetColors[idx+2] = defaultColor.b;
+                        targetPositions[idx+2] = (Math.random()-0.5)*4;
+                    }
+                }
+            }
+        }
+
+        // LOVE 震撼登场：独立逻辑 - 已移除序列，改为一次性展示
+        // async function runLoveSequence() ... 
+
+        async function initVision() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks("./libs");
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: "./libs/hand_landmarker.task", delegate: "GPU" },
+                    runningMode: "VIDEO", numHands: 1
+                });
+                webcam = document.getElementById('webcam');
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+                webcam.srcObject = stream;
+                webcam.onloadeddata = () => { document.getElementById('loader').style.display = 'none'; predict(); };
+            } catch (e) { document.getElementById('loader').innerText = "CAMERA ERROR"; }
+        }
+
+        function predict() {
+            const now = performance.now();
+            if (handLandmarker && webcam.readyState >= 2) {
+                const results = handLandmarker.detectForVideo(webcam, now);
+                if (results.landmarks.length > 0) {
+                    const lm = results.landmarks[0];
+                    const indexUp = lm[8].y < lm[6].y, midUp = lm[12].y < lm[10].y, 
+                          ringUp = lm[16].y < lm[14].y, pinkyUp = lm[20].y < lm[18].y;
+                    
+                    // Thumb extended check: Distance from tip to pinky base vs IP to pinky base
+                    const thumbExtended = Math.hypot(lm[4].x - lm[17].x, lm[4].y - lm[17].y) > 
+                                          Math.hypot(lm[2].x - lm[17].x, lm[2].y - lm[17].y) * 1.2;
+
+                    const count = [indexUp, midUp, ringUp, pinkyUp].filter(Boolean).length;
+
+                    let g = "";
+                    // 识别“我爱你”手势：大拇指、食指、小指伸出，中指无名指弯曲
+                    if (indexUp && pinkyUp && !midUp && !ringUp && thumbExtended) {
+                        g = "OAOA";
+                    } 
+                    else if (indexUp && midUp && ringUp && !pinkyUp) g = "3";
+                    else if (count === 4) g = "SCATTER";
+                    else if (count === 0) g = "BOBO";
+                    else if (indexUp && midUp && count === 2) g = "2";
+                    else if (indexUp && count === 1) g = "1";
+
+                    // 拳头跟随逻辑：当检测到BOBO时，计算手部位置
+                    if (g === "BOBO") {
+                        // lm[9] 是中指指根，作为手部中心点
+                        // 屏幕Y坐标 0(上) -> 1(下) => 3D Y: 正 -> 负
+                        // 屏幕X坐标 0(左) -> 1(右) => 3D X: 负 -> 正 (注意镜像)
+                        // 移动幅度放大系数设为60 (Y) 和 80 (X)
+                        targetGroupY = (0.5 - lm[9].y) * 60;
+                        targetGroupX = (0.5 - lm[9].x) * 80; // 镜像翻转：手往右移(画面左侧x<0.5) -> 物体往右(x>0)
+                    } else {
+                        targetGroupY = 0;
+                        targetGroupX = 0;
+                    }
+
+                    if (g && g !== lastGesture) {
+                        lastGesture = g; updateShape(g);
+                    }
+                }
+            }
+            requestAnimationFrame(predict);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const pos = geometry.attributes.position.array;
+            const colors = geometry.attributes.color.array;
+            const time = Date.now() * 0.001;
+            
+            // 雪花逻辑：仅在 BOBO 模式（初始或检测到BOBO）下显示
+            const showSnow = (lastGesture === 'BOBO' || lastGesture === '');
+            
+            if (snowSystem && bgStarSystem) {
+                snowSystem.visible = showSnow;
+                bgStarSystem.visible = showSnow;
+
+                if (showSnow) {
+                    const snowPos = snowGeo.attributes.position.array;
+                    const speeds = snowGeo.attributes.velocity.array;
+                    
+                    for(let i=0; i<snowPos.length/3; i++) {
+                        const idx = i * 3;
+                        // 1. 下落
+                        snowPos[idx+1] -= speeds[i]; 
+                        
+                        // 2. 左右飘动
+                        snowPos[idx] += Math.sin(time * 2 + i) * 0.02;
+
+                        // 3. 循环重置
+                        if (snowPos[idx+1] < -60) {
+                            snowPos[idx+1] = 60;
+                            snowPos[idx] = (Math.random() - 0.5) * 250;
+                        }
+                    }
+                    snowGeo.attributes.position.needsUpdate = true;
+                }
+            }
+
+            // 粒子组整体跟随拳头移动
+            // 使用较高的插值速度(0.4)以实现紧跟效果，响应更灵敏
+            if (particles) {
+                particles.position.y += (targetGroupY - particles.position.y) * 0.4;
+                particles.position.x += (targetGroupX - particles.position.x) * 0.4;
+            }
+
+            // OAOA模式：更明显的放大缩小呼吸效果
+            // 频率从 2.0 提升到 4.0，让心跳感更强烈
+            const breathe = (lastGesture === 'OAOA') 
+                            ? Math.sin(time * 4.0) * 0.15 + 1.2 
+                            : Math.sin(time * 0.5) * 0.05 + 1.0;
+            
+            const floatY = Math.sin(time * 0.8) * 0.2;
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const idx = i * 3;
+                currentPositions[idx]   += (targetPositions[idx]   - currentPositions[idx])   * CONFIG.lerpSpeed;
+                currentPositions[idx+1] += (targetPositions[idx+1] - currentPositions[idx+1]) * CONFIG.lerpSpeed;
+                currentPositions[idx+2] += (targetPositions[idx+2] - currentPositions[idx+2]) * CONFIG.lerpSpeed;
+                currentColors[idx]   += (targetColors[idx]   - currentColors[idx])   * CONFIG.lerpSpeed;
+                currentColors[idx+1] += (targetColors[idx+1] - currentColors[idx+1]) * CONFIG.lerpSpeed;
+                currentColors[idx+2] += (targetColors[idx+2] - currentColors[idx+2]) * CONFIG.lerpSpeed;
+
+                pos[idx]     = currentPositions[idx] * breathe;
+                pos[idx+1]   = currentPositions[idx+1] * breathe + floatY;
+                pos[idx+2]   = currentPositions[idx+2] + Math.cos(time + i * 0.1) * 0.1;
+                colors[idx]   = currentColors[idx];
+                colors[idx+1] = currentColors[idx+1];
+                colors[idx+2] = currentColors[idx+2];
+            }
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        initThree(); initVision(); animate();
+    </script>
+</body>
+</html>

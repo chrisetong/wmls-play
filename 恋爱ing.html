@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini 3 x Mayday - LOVE Edition</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Tinos:ital@0;1&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-color: #050505;
+            --gold-color: #D4AF37;
+        }
+        body { margin: 0; overflow: hidden; background-color: var(--bg-color); font-family: 'Tinos', serif; user-select: none; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        #webcam-wrapper { position: absolute; bottom: 30px; left: 30px; pointer-events: auto; }
+        #webcam-container { width: 160px; height: 120px; border: 1px solid rgba(212, 175, 55, 0.2); border-radius: 4px; overflow: hidden; background: #000; margin-bottom: 8px; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        #webcam-wrapper.hidden #webcam-container { height: 0; opacity: 0; margin-bottom: 0; border: none; }
+        video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .cam-toggle-btn { font-family: 'Cinzel', serif; color: #888; font-size: 10px; background: transparent; border: 1px solid rgba(100,100,100,0.3); padding: 5px 15px; cursor: pointer; letter-spacing: 1px; transition: all 0.3s; width: 160px; }
+        .cam-toggle-btn:hover { color: var(--gold-color); border-color: var(--gold-color); }
+        #loader { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--gold-color); font-family: 'Cinzel', serif; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <div id="loader">LOADING VISION ENGINE...</div>
+
+    <div id="ui-layer">
+        <div id="webcam-wrapper" class="hidden">
+            <div id="webcam-container">
+                <video id="webcam" autoplay playsinline></video>
+            </div>
+            <button class="cam-toggle-btn" id="toggle-cam">SHOW CAMERA</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from './libs/three.module.js';
+        import { FilesetResolver, HandLandmarker } from './libs/tasks-vision.js';
+
+        const CONFIG = {
+            particleCount: 35000, 
+            particleSize: 0.35,
+            color: 0xD4AF37,
+            lerpSpeed: 0.2, // 加快变换速度
+            cameraZ: 40,
+            colorBoost: 1.0 
+        };
+
+        let scene, camera, renderer, particles, geometry;
+        let snowSystem, snowGeo, bgStarSystem; // 雪花系统 & 背景星空
+        let galaxySystem, galaxyGroup; // 银河星云系统
+        let titleSystem; // 恋爱ing 标题系统
+        let handLandmarker, webcam;
+        let currentPositions = [];
+        let targetPositions = [];
+        let currentColors = [];
+        let targetColors = [];
+        let lastGesture = "BOBO"; // 初始状态设为 BOBO，确保标题显示
+        let boboStartTime = Date.now(); // 记录进入BOBO模式的时间
+        let carStartTime = 0; // 记录进入食指BOBO模式的时间
+        let boboSource = 'init'; // BOBO触发源: 'init', 'thumb', 'index'
+        let targetGroupY = 0; // 粒子组整体垂直位移目标
+        let targetGroupX = 0; // 粒子组整体水平位移目标
+        let currentLoveScale = 1.0; // LOVE手势当前缩放比例
+        let targetLoveScale = 1.0;  // LOVE手势目标缩放比例
+        let carMesh; // 汽车模型
+        let carArrivalTime = 0; // 汽车到达中间的时间
+
+        // UI
+        const toggleBtn = document.getElementById('toggle-cam');
+        const camWrapper = document.getElementById('webcam-wrapper');
+        toggleBtn.onclick = () => {
+            const isHidden = camWrapper.classList.toggle('hidden');
+            toggleBtn.innerText = isHidden ? "SHOW CAMERA" : "HIDE CAMERA";
+        };
+
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = CONFIG.cameraZ;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            createParticleSystem();
+            createSnowSystem(); // 初始化雪花
+            createGalaxySystem(); // 初始化银河星云
+            createTitleSystem(); // 初始化恋爱ing标题
+            createCarSystem(); // 初始化汽车
+            updateShape('BOBO');
+
+            window.onresize = () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            };
+        }
+
+        function createParticleSystem() {
+            geometry = new THREE.BufferGeometry();
+            const posArray = new Float32Array(CONFIG.particleCount * 3);
+            const colArray = new Float32Array(CONFIG.particleCount * 3);
+            const defaultColor = new THREE.Color(CONFIG.color);
+
+            for (let i = 0; i < CONFIG.particleCount * 3; i+=3) {
+                posArray[i] = (Math.random() - 0.5) * 100;
+                posArray[i+1] = (Math.random() - 0.5) * 100;
+                posArray[i+2] = (Math.random() - 0.5) * 100;
+                currentPositions[i] = posArray[i];
+                currentPositions[i+1] = posArray[i+1];
+                currentPositions[i+2] = posArray[i+2];
+                colArray[i] = defaultColor.r; colArray[i+1] = defaultColor.g; colArray[i+2] = defaultColor.b;
+                currentColors[i] = defaultColor.r; currentColors[i+1] = defaultColor.g; currentColors[i+2] = defaultColor.b;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(0.6, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+
+            const material = new THREE.PointsMaterial({
+                color: 0xffffff, vertexColors: true, size: CONFIG.particleSize,
+                map: new THREE.CanvasTexture(canvas), transparent: true,
+                blending: THREE.NormalBlending, depthWrite: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+            targetPositions = new Float32Array(CONFIG.particleCount * 3);
+            targetColors = new Float32Array(CONFIG.particleCount * 3);
+        }
+
+        function createGalaxySystem() {
+            const params = {
+                count: 200000, // 再次增加粒子数量
+                size: 0.25, // 增大粒子尺寸
+                radius: 300, // 极大半径，确保超出屏幕边界
+                branches: 10, // 增加分支以填充空隙
+                spin: 1.0,
+                randomness: 1.2, // 高随机性，让结构更松散，像一片星海
+                insideColor: '#ffbb66',
+                outsideColor: '#2244ff'
+            };
+
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(params.count * 3);
+            const colors = new Float32Array(params.count * 3);
+            const scales = new Float32Array(params.count);
+
+            const colorInside = new THREE.Color(params.insideColor);
+            const colorOutside = new THREE.Color(params.outsideColor);
+
+            for (let i = 0; i < params.count; i++) {
+                const i3 = i * 3;
+                const radius = Math.random() * params.radius;
+                const branchAngle = ((i % params.branches) / params.branches) * Math.PI * 2;
+                const spinAngle = radius * params.spin;
+
+                const randomX = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? 1 : -1) * params.randomness * radius;
+                const randomY = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? 1 : -1) * params.randomness * (radius * 0.5);
+                const randomZ = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? 1 : -1) * params.randomness * radius;
+
+                positions[i3] = Math.cos(branchAngle + spinAngle) * radius + randomX;
+                positions[i3 + 1] = randomY;
+                positions[i3 + 2] = Math.sin(branchAngle + spinAngle) * radius + randomZ; // 居中生成，通过容器移动位置
+
+                const mixedColor = colorInside.clone();
+                mixedColor.lerp(colorOutside, radius / params.radius);
+                colors[i3] = mixedColor.r;
+                colors[i3 + 1] = mixedColor.g;
+                colors[i3 + 2] = mixedColor.b;
+
+                scales[i] = Math.random();
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('aScale', new THREE.BufferAttribute(scales, 1));
+
+            // 生成贴图
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            gradient.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 64, 64);
+            const texture = new THREE.CanvasTexture(canvas);
+
+            const material = new THREE.PointsMaterial({
+                size: params.size,
+                sizeAttenuation: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+                vertexColors: true,
+                map: texture,
+                transparent: true
+            });
+
+            galaxySystem = new THREE.Points(geometry, material);
+            
+            // 创建容器组，用于调整整体角度
+            galaxyGroup = new THREE.Group();
+            galaxyGroup.add(galaxySystem);
+            
+            // 调整角度以展示3D螺旋结构
+            galaxyGroup.rotation.x = 0.4; // 更平缓的角度，让星云像地毯一样铺开
+            galaxyGroup.rotation.z = 0.1; 
+            galaxyGroup.position.z = -50; // 放在背景深处
+            galaxyGroup.position.y = 0;   // 居中
+
+            galaxyGroup.visible = false; // 默认隐藏
+            scene.add(galaxyGroup);
+        }
+
+        function createTitleSystem() {
+            // 1. 在Canvas上绘制文字
+            const canvas = document.createElement('canvas');
+            const size = 512;
+            canvas.width = size; canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            // 字体调大
+            ctx.font = 'bold 80px "Microsoft YaHei", "Cinzel", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText('恋爱ing', size/2, size/2);
+
+            // 2. 提取像素点
+            const imgData = ctx.getImageData(0, 0, size, size).data;
+            const pts = [];
+            const step = 2; // 采样步长
+            for (let y = 0; y < size; y += step) {
+                for (let x = 0; x < size; x += step) {
+                    const idx = (y * size + x) * 4;
+                    if (imgData[idx + 3] > 128) {
+                        pts.push({
+                            x: (x - size / 2) * 0.15, // 稍微放大缩放系数
+                            y: -(y - size / 2) * 0.15
+                        });
+                    }
+                }
+            }
+
+            // 3. 创建粒子几何体
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(pts.length * 3);
+            const colors = new Float32Array(pts.length * 3);
+            const initialY = new Float32Array(pts.length);
+
+            const goldColor = new THREE.Color(0xD4AF37); // 金色
+            const pinkColor = new THREE.Color(0xFF69B4); // 粉色
+            const whiteColor = new THREE.Color(0xFFFFFF); // 白色
+
+            for (let i = 0; i < pts.length; i++) {
+                const p = pts[i];
+                const idx = i * 3;
+                
+                positions[idx] = p.x;
+                positions[idx + 1] = p.y;
+                positions[idx + 2] = (Math.random() - 0.5) * 0.5;
+
+                initialY[i] = p.y;
+
+                // 颜色逻辑：主要是金色，夹杂粉色和白色
+                const rnd = Math.random();
+                let c;
+                if (rnd > 0.7) c = goldColor; // 30% 纯金
+                else if (rnd > 0.4) c = pinkColor; // 30% 粉色
+                else c = whiteColor; // 40% 白色
+
+                // 稍微混合一点随机性，避免太单调
+                const mixColor = c.clone().lerp(goldColor, Math.random() * 0.5);
+
+                colors[idx] = mixColor.r;
+                colors[idx + 1] = mixColor.g;
+                colors[idx + 2] = mixColor.b;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('initialY', new THREE.BufferAttribute(initialY, 1));
+
+            // 生成圆形光晕贴图
+            const tCanvas = document.createElement('canvas');
+            tCanvas.width = 32; tCanvas.height = 32;
+            const tCtx = tCanvas.getContext('2d');
+            const grad = tCtx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            tCtx.fillStyle = grad;
+            tCtx.fillRect(0, 0, 32, 32);
+            const texture = new THREE.CanvasTexture(tCanvas);
+
+            const material = new THREE.PointsMaterial({
+                size: 0.35, 
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.9,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                map: texture 
+            });
+
+            titleSystem = new THREE.Points(geometry, material);
+            
+            // 固定在屏幕更上方
+            titleSystem.position.y = 18; 
+            titleSystem.position.z = 0;
+            titleSystem.visible = false;
+            scene.add(titleSystem);
+        }
+
+        function createCarSystem() {
+            const loader = new THREE.TextureLoader();
+            loader.load('./libs/images/che.png', (texture) => {
+                // 假设图片是长方形，保持比例
+                const aspect = texture.image.width / texture.image.height;
+                const height = 10; // 缩小1/3 (15 * 2/3 = 10)
+                const width = height * aspect;
+
+                const geometry = new THREE.PlaneGeometry(width, height);
+                const material = new THREE.MeshBasicMaterial({ 
+                    map: texture, 
+                    transparent: true,
+                    side: THREE.DoubleSide
+                });
+                
+                carMesh = new THREE.Mesh(geometry, material);
+                
+                // 初始位置：左下角屏幕外
+                // 视锥体计算：Z=0处的可视高度
+                // vFOV = 75, Z = 40 (相机位置) -> 物体在 Z=0
+                // 实际上相机在Z=40，物体在Z=0，距离是40
+                const vFOV = camera.fov * Math.PI / 180;
+                const visibleHeight = 2 * Math.tan(vFOV / 2) * CONFIG.cameraZ;
+                const visibleWidth = visibleHeight * camera.aspect;
+
+                carMesh.position.set(-visibleWidth/2 - width, -visibleHeight/2 + height/2, 5); // Z=5 放在粒子前面
+                carMesh.visible = false;
+                
+                scene.add(carMesh);
+            });
+        }
+
+        function createSnowSystem() {
+            // 1. 银河系背景 (Galaxy Sky) - 营造深邃梦幻的星空
+            const starCount = 2000;
+            const starGeo = new THREE.BufferGeometry();
+            const starPos = new Float32Array(starCount * 3);
+            const starColors = new Float32Array(starCount * 3);
+
+            // 银河系配色：深蓝、紫、粉、白
+            const c1 = new THREE.Color(0x1b3984); // 深蓝
+            const c2 = new THREE.Color(0x6a0dad); // 紫色
+            const c3 = new THREE.Color(0xff69b4); // 粉色
+            const c4 = new THREE.Color(0xffffff); // 亮白
+
+            for(let i=0; i<starCount; i++) {
+                const idx = i * 3;
+                
+                // 随机分布在广阔背景
+                const x = (Math.random() - 0.5) * 450;
+                const y = (Math.random() - 0.5) * 350;
+                const z = (Math.random() - 0.5) * 100 - 80; // 放在较远处
+
+                starPos[idx] = x;
+                starPos[idx+1] = y;
+                starPos[idx+2] = z;
+
+                // 银河带逻辑：越靠近对角线 (y = 0.4x) 颜色越丰富，星星越亮
+                const distToBand = Math.abs(y - 0.4 * x) / 180; // 归一化距离
+                
+                let color = new THREE.Color();
+                const rnd = Math.random();
+
+                if (rnd > distToBand) {
+                    // 银河带内部：色彩丰富
+                    const mix = Math.random();
+                    if (mix > 0.8) color.copy(c4); // 20% 亮白星
+                    else if (mix > 0.5) color.copy(c3).lerp(c2, Math.random()); // 粉紫渐变
+                    else color.copy(c1).lerp(c2, Math.random()); // 蓝紫渐变
+                } else {
+                    // 银河带外部：深邃稀疏
+                    color.copy(c1).multiplyScalar(0.5); // 暗淡蓝
+                }
+
+                starColors[idx] = color.r;
+                starColors[idx+1] = color.g;
+                starColors[idx+2] = color.b;
+            }
+            starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+            starGeo.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
+            
+            const starCanvas = document.createElement('canvas');
+            starCanvas.width = 16; starCanvas.height = 16;
+            const sCtx = starCanvas.getContext('2d');
+            const sGrad = sCtx.createRadialGradient(8,8,0, 8,8,8);
+            sGrad.addColorStop(0, 'rgba(255,255,255,1)');
+            sGrad.addColorStop(0.5, 'rgba(255,255,255,0.5)');
+            sGrad.addColorStop(1, 'rgba(255,255,255,0)');
+            sCtx.fillStyle = sGrad; sCtx.fillRect(0,0,16,16);
+
+            const starMat = new THREE.PointsMaterial({
+                vertexColors: true, // 启用顶点颜色
+                size: 1.2, 
+                map: new THREE.CanvasTexture(starCanvas),
+                transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            bgStarSystem = new THREE.Points(starGeo, starMat);
+            scene.add(bgStarSystem);
+
+            // 2. 漫天雪花 (Falling Snowflakes) - 使用雪花纹理
+            const snowCount = 600;
+            snowGeo = new THREE.BufferGeometry();
+            const posArray = new Float32Array(snowCount * 3);
+            const speedArray = new Float32Array(snowCount); // 个体下落速度
+            
+            for (let i = 0; i < snowCount; i++) {
+                const idx = i * 3;
+                posArray[idx] = (Math.random() - 0.5) * 250; 
+                posArray[idx+1] = (Math.random() - 0.5) * 150; 
+                posArray[idx+2] = (Math.random() - 0.5) * 60 + 10; // 较近
+                speedArray[i] = Math.random() * 0.1 + 0.05;
+            }
+            snowGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            snowGeo.setAttribute('velocity', new THREE.BufferAttribute(speedArray, 1));
+
+            // 绘制六角雪花纹理
+            const snowCanvas = document.createElement('canvas');
+            snowCanvas.width = 32; snowCanvas.height = 32;
+            const ctx = snowCanvas.getContext('2d');
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.translate(16, 16);
+            for(let k=0; k<3; k++) {
+                ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(0, 10); ctx.stroke();
+                ctx.rotate(Math.PI/3);
+            }
+            // 中心加点光晕
+            ctx.fillStyle = '#FFFFFF';
+            ctx.beginPath(); ctx.arc(0,0, 2, 0, Math.PI*2); ctx.fill();
+
+            const snowMat = new THREE.PointsMaterial({
+                color: 0xffffff, size: 1.5, 
+                map: new THREE.CanvasTexture(snowCanvas), 
+                transparent: true, opacity: 0.9, 
+                blending: THREE.AdditiveBlending, depthWrite: false
+            });
+
+            snowSystem = new THREE.Points(snowGeo, snowMat);
+            scene.add(snowSystem);
+        }
+
+        function generatePoints(type) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            const size = 600;
+            canvas.width = size; canvas.height = size;
+            ctx.clearRect(0, 0, size, size);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+            if (['L', 'O', 'V', 'E', '1', '2', '3'].includes(type)) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 380px "Cinzel"';
+                ctx.fillText(type, size/2, size/2 + 40);
+            } else if (type === 'LOVE') {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 160px "Cinzel"';
+                ctx.fillText('LOVE', size/2, size/2 + 20);
+            } else if (type === 'BOBO') {
+                // 绘制缩小后的 BOBO (0.6 / 1.2 = 0.5)
+                const cx = size/2; 
+                const cy = size/2 + 60; 
+
+                ctx.save();
+                // 缩放操作：以BOBO中心为原点进行缩放
+                ctx.translate(cx, cy);
+                ctx.scale(0.5, 0.5);
+                ctx.translate(-cx, -cy);
+
+                // --- BOBO 原绘制逻辑开始 ---
+                ctx.fillStyle = '#F35608';
+                ctx.beginPath(); ctx.ellipse(cx, cy, 180, 160, 0, 0, Math.PI*2); ctx.fill();
+                const drawLeaf = (x, y, r, s) => {
+                    ctx.save(); ctx.translate(x, y); ctx.rotate(r); ctx.scale(s, s);
+                    ctx.beginPath(); ctx.moveTo(0,0);
+                    ctx.bezierCurveTo(-35,-45, -45,-110, 0,-150); ctx.bezierCurveTo(45,-110, 35,-45, 0,0);
+                    ctx.fillStyle = '#66D033'; ctx.fill(); ctx.restore();
+                };
+                const leafBaseY = cy - 155;
+                drawLeaf(cx, leafBaseY, 0, 1.2); drawLeaf(cx-12, leafBaseY+6, -0.65, 1.05); drawLeaf(cx+12, leafBaseY+6, 0.65, 1.05);
+                const eyeY = cy - 20;
+                ctx.fillStyle = '#FFFFFF';
+                ctx.beginPath(); ctx.ellipse(cx-55, eyeY, 38, 48, 0, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(cx+55, eyeY, 38, 48, 0, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#2778D4';
+                const drawPupil = (ex) => {
+                    ctx.save(); ctx.translate(ex, eyeY+4); ctx.beginPath(); ctx.moveTo(0, -26);
+                    ctx.bezierCurveTo(16, -20, 16, 8, 0, 26); ctx.bezierCurveTo(-16, 8, -16, -20, 0, -26);
+                    ctx.fill(); ctx.restore();
+                };
+                drawPupil(cx-42); drawPupil(cx+42);
+                ctx.strokeStyle = '#000000'; ctx.lineWidth = 14; ctx.lineCap = 'round';
+                ctx.beginPath(); ctx.moveTo(cx-45, cy+62); ctx.quadraticCurveTo(cx-22, cy+92, cx, cy+62);
+                ctx.quadraticCurveTo(cx+22, cy+92, cx+45, cy+62); ctx.stroke();
+                // --- BOBO 原绘制逻辑结束 ---
+
+                ctx.restore();
+            }
+
+            const imgData = ctx.getImageData(0, 0, size, size).data;
+            const pts = [];
+            const step = 3; 
+            for (let y=0; y<size; y+=step) {
+                for (let x=0; x<size; x+=step) {
+                    const idx = (y*size+x)*4;
+                    if (imgData[idx+3] > 128) {
+                        pts.push({ x: (x-size/2)*0.1, y: -(y-size/2)*0.1, r: imgData[idx]/255, g: imgData[idx+1]/255, b: imgData[idx+2]/255 });
+                    }
+                }
+            }
+            return pts;
+        }
+
+        function updateShape(type) {
+            const pts = (type === 'SCATTER') ? [] : generatePoints(type);
+            const defaultColor = new THREE.Color(CONFIG.color);
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const idx = i * 3;
+                
+                // LOVE模式下：保留一部分粒子作为背景星空 (例如每3个粒子取1个做背景)
+                let isLoveBg = (type === 'LOVE' && i % 3 === 0);
+
+                if (pts.length === 0 || isLoveBg) {
+                    if (type === 'LOVE') {
+                        // 全屏星空特效
+                        targetPositions[idx] = (Math.random() - 0.5) * 200; // 宽
+                        targetPositions[idx+1] = (Math.random() - 0.5) * 120; // 高
+                        targetPositions[idx+2] = (Math.random() - 0.5) * 100 - 20; // 略微靠后
+                        // 星星闪烁白/金色
+                        const shade = Math.random() * 0.5 + 0.5;
+                        targetColors[idx] = shade; targetColors[idx+1] = shade; targetColors[idx+2] = shade;
+                    } else {
+                        const r = 35 * Math.cbrt(Math.random());
+                        const theta = Math.random() * 6.28, phi = Math.acos(2*Math.random()-1);
+                        targetPositions[idx] = r * Math.sin(phi) * Math.cos(theta);
+                        targetPositions[idx+1] = r * Math.sin(phi) * Math.sin(theta);
+                        targetPositions[idx+2] = r * Math.cos(phi);
+                        
+                        if (type === 'SCATTER') {
+                            // 五指张开：大部分保留原色，少部分五颜六色
+                            if (Math.random() > 0.8) { // 20% 概率变彩色
+                                const color = new THREE.Color();
+                                color.setHSL(Math.random(), 1.0, 0.6); // 随机色相，高饱和度，中等亮度
+                                targetColors[idx] = color.r; 
+                                targetColors[idx+1] = color.g; 
+                                targetColors[idx+2] = color.b;
+                            } else {
+                                targetColors[idx] = defaultColor.r; 
+                                targetColors[idx+1] = defaultColor.g; 
+                                targetColors[idx+2] = defaultColor.b;
+                            }
+                        } else {
+                            targetColors[idx] = defaultColor.r; 
+                            targetColors[idx+1] = defaultColor.g; 
+                            targetColors[idx+2] = defaultColor.b;
+                        }
+                    }
+                } else {
+                    const p = pts[i % pts.length];
+                    targetPositions[idx] = p.x + (Math.random()-0.5)*0.2;
+                    targetPositions[idx+1] = p.y + (Math.random()-0.5)*0.2;
+                    if (type === 'BOBO') {
+                        targetColors[idx] = p.r; targetColors[idx+1] = p.g; targetColors[idx+2] = p.b;
+                        targetPositions[idx+2] = 0;
+                    } else {
+                        targetColors[idx] = defaultColor.r; targetColors[idx+1] = defaultColor.g; targetColors[idx+2] = defaultColor.b;
+                        targetPositions[idx+2] = (Math.random()-0.5)*4;
+                    }
+                }
+            }
+        }
+
+        // LOVE 震撼登场：独立逻辑 - 已移除序列，改为一次性展示
+        // async function runLoveSequence() ... 
+
+        async function initVision() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks("./libs");
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: "./libs/hand_landmarker.task", delegate: "GPU" },
+                    runningMode: "VIDEO", numHands: 1
+                });
+                webcam = document.getElementById('webcam');
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+                webcam.srcObject = stream;
+                webcam.onloadeddata = () => { document.getElementById('loader').style.display = 'none'; predict(); };
+            } catch (e) { document.getElementById('loader').innerText = "CAMERA ERROR"; }
+        }
+
+        function predict() {
+            const now = performance.now();
+            if (handLandmarker && webcam.readyState >= 2) {
+                const results = handLandmarker.detectForVideo(webcam, now);
+                if (results.landmarks.length > 0) {
+                    const lm = results.landmarks[0];
+                    const indexUp = lm[8].y < lm[6].y, midUp = lm[12].y < lm[10].y, 
+                          ringUp = lm[16].y < lm[14].y, pinkyUp = lm[20].y < lm[18].y;
+                    
+                    // Thumb extended check: Distance from tip to pinky base vs IP to pinky base
+                    const thumbExtended = Math.hypot(lm[4].x - lm[17].x, lm[4].y - lm[17].y) > 
+                                          Math.hypot(lm[2].x - lm[17].x, lm[2].y - lm[17].y) * 1.2;
+
+                    const count = [indexUp, midUp, ringUp, pinkyUp].filter(Boolean).length;
+
+                    let g = "";
+                    let currentSource = ""; // 当前帧的触发源
+
+                    // 识别“我爱你”手势：大拇指、食指、小指伸出，中指无名指弯曲
+                    if (indexUp && pinkyUp && !midUp && !ringUp && thumbExtended) {
+                        g = "LOVE";
+                    } 
+                    // E: 中指、无名指、小指伸直 (Index closed)
+                    else if (!indexUp && midUp && ringUp && pinkyUp) {
+                        g = "E";
+                    }
+                    // L: 拇指和食指伸直 (Others closed)
+                    else if (indexUp && !midUp && !ringUp && !pinkyUp && thumbExtended) {
+                        g = "L";
+                    }
+                    // 3: 食指、中指、无名指伸直 -> E
+                    else if (indexUp && midUp && ringUp && !pinkyUp) {
+                        g = "E";
+                    }
+                    // V (原2): 食指、中指伸直
+                    else if (indexUp && midUp && count === 2) {
+                        g = "V";
+                    }
+                    // 1: 仅食指伸直 -> BOBO
+                    else if (indexUp && count === 1) {
+                        g = "BOBO";
+                        currentSource = "index";
+                    }
+                    // 0 fingers up: Fist or Thumbs Up
+                    else if (count === 0) {
+                        if (thumbExtended) {
+                             g = "BOBO"; // 竖起大拇指 -> BOBO图像
+                             currentSource = "thumb";
+                        }
+                        else g = "O";                  // 握拳 -> O字母
+                    }
+                    // 4 fingers up
+                    else if (count === 4) {
+                        g = "SCATTER";
+                    }
+
+                    // 拳头跟随逻辑：当检测到BOBO时，计算手部位置
+                    if (g === "BOBO") {
+                        // 只有食指触发的BOBO才跟随移动，大拇指触发的（像初始界面一样）保持居中
+                        if (currentSource === 'index') {
+                            // lm[9] 是中指指根，作为手部中心点
+                            // 屏幕Y坐标 0(上) -> 1(下) => 3D Y: 正 -> 负
+                            // 屏幕X坐标 0(左) -> 1(右) => 3D X: 负 -> 正 (注意镜像)
+                            // 移动幅度放大系数设为60 (Y) 和 80 (X)
+                            targetGroupY = (0.5 - lm[9].y) * 60;
+                            targetGroupX = (0.5 - lm[9].x) * 80; // 镜像翻转：手往右移(画面左侧x<0.5) -> 物体往右(x>0)
+                        } else {
+                            // 大拇指BOBO，居中（模拟初始效果）
+                            targetGroupY = 0;
+                            targetGroupX = 0;
+                        }
+                    } else {
+                        targetGroupY = 0;
+                        targetGroupX = 0;
+                    }
+
+                    if (g && g !== lastGesture) {
+                        if (g === 'BOBO') {
+                            boboStartTime = Date.now();
+                            boboSource = currentSource;
+                            if (currentSource === 'index') {
+                                carStartTime = Date.now(); // 开始汽车计时
+                                carArrivalTime = 0; // 重置到达时间
+                            }
+                        } else {
+                            boboSource = ''; // Reset source
+                        }
+                        lastGesture = g; updateShape(g);
+                    } else if (g === 'BOBO' && lastGesture === 'BOBO') {
+                        // 即使手势没变，如果触发源变了（比如从大拇指变成食指）
+                        if (currentSource !== boboSource) {
+                            boboSource = currentSource;
+                            if (currentSource === 'index') {
+                                carStartTime = Date.now(); // 重新开始汽车计时
+                                carArrivalTime = 0; // 重置到达时间
+                            }
+                        }
+                    }
+                    
+                    // LOVE手势距离缩放逻辑
+                    if (g === 'LOVE') {
+                        // 计算手掌大小（腕部到中指根部的距离），作为距离的近似值
+                        // 距离越近，handSize越大；距离越远，handSize越小
+                        const handSize = Math.hypot(lm[0].x - lm[9].x, lm[0].y - lm[9].y);
+                        
+                        // 估算可视区域宽度
+                        const vFOV = camera.fov * Math.PI / 180;
+                        const visibleHeight = 2 * Math.tan(vFOV / 2) * camera.position.z;
+                        const visibleWidth = visibleHeight * camera.aspect;
+                        
+                        // "LOVE"文字在3D空间中的原始大致宽度 (假设约为40单位)
+                        const textBaseWidth = 40;
+                        
+                        // 最小宽度要求：屏幕宽度的1/3
+                        const minWidth = visibleWidth / 3;
+                        const minScale = minWidth / textBaseWidth;
+                        
+                        // 映射逻辑：
+                        // 手很近 (handSize ~ 0.4) -> 缩放最小 (minScale)
+                        // 手很远 (handSize ~ 0.05) -> 缩放最大 (例如 2.0)
+                        
+                        const farSize = 0.05;
+                        const nearSize = 0.4;
+                        const maxScale = 2.0;
+                        
+                        // 归一化 handSize (0..1)
+                        let t = (handSize - farSize) / (nearSize - farSize);
+                        t = Math.max(0, Math.min(1, t)); // Clamp to 0-1
+                        
+                        // 线性插值: t=0 -> maxScale, t=1 -> minScale
+                        targetLoveScale = maxScale * (1 - t) + minScale * t;
+                    } else {
+                        // 重置为默认
+                        targetLoveScale = 1.0;
+                    }
+                }
+            }
+            requestAnimationFrame(predict);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const pos = geometry.attributes.position.array;
+            const colors = geometry.attributes.color.array;
+            const time = Date.now() * 0.001;
+            
+            // 雪花逻辑：仅在 BOBO 模式（初始或检测到BOBO）下显示
+            const showSnow = (lastGesture === 'BOBO' || lastGesture === '');
+            // 银河星云逻辑：在 L, O, V, E 模式下显示
+            const showGalaxy = ['L', 'O', 'V', 'E'].includes(lastGesture);
+
+            if (galaxyGroup) {
+                galaxyGroup.visible = showGalaxy;
+                if (showGalaxy && galaxySystem) {
+                    // 旋转内部的粒子系统，实现自转
+                    galaxySystem.rotation.y += 0.002; 
+                }
+            }
+            
+            if (snowSystem && bgStarSystem) {
+                snowSystem.visible = showSnow;
+                bgStarSystem.visible = showSnow;
+
+                if (showSnow) {
+                    const snowPos = snowGeo.attributes.position.array;
+                    const speeds = snowGeo.attributes.velocity.array;
+                    
+                    for(let i=0; i<snowPos.length/3; i++) {
+                        const idx = i * 3;
+                        // 1. 下落
+                        snowPos[idx+1] -= speeds[i]; 
+                        
+                        // 2. 左右飘动
+                        snowPos[idx] += Math.sin(time * 2 + i) * 0.02;
+
+                        // 3. 循环重置
+                        if (snowPos[idx+1] < -60) {
+                            snowPos[idx+1] = 60;
+                            snowPos[idx] = (Math.random() - 0.5) * 250;
+                        }
+                    }
+                    snowGeo.attributes.position.needsUpdate = true;
+                }
+            }
+            
+            // 标题逻辑：仅在 BOBO 模式下显示
+            if (titleSystem) {
+                let showTitle = (lastGesture === 'BOBO');
+
+                // 延迟 0.5 秒显示
+                if (showTitle && (Date.now() - boboStartTime < 500)) {
+                    showTitle = false;
+                }
+
+                titleSystem.visible = showTitle;
+                if (showTitle) {
+                    // 轻微浮动动画
+                    const tPos = titleSystem.geometry.attributes.position.array;
+                    const initY = titleSystem.geometry.attributes.initialY.array;
+                    for (let i = 0; i < tPos.length / 3; i++) {
+                        const idx = i * 3;
+                        // 上下浮动
+                        tPos[idx + 1] = initY[i] + Math.sin(time * 2 + tPos[idx] * 0.1) * 0.5;
+                    }
+                    titleSystem.geometry.attributes.position.needsUpdate = true;
+                }
+            }
+
+            // 汽车动画逻辑
+            if (carMesh) {
+                if (lastGesture === 'BOBO' && boboSource === 'index') {
+                    const elapsed = Date.now() - carStartTime;
+                    // 进场时间再提前 0.5秒 (1500 -> 1000)
+                    if (elapsed > 1000) {
+                        carMesh.visible = true;
+                        
+                        // 重新计算可视区域以确保位置准确
+                        const vFOV = camera.fov * Math.PI / 180;
+                        const visibleHeight = 2 * Math.tan(vFOV / 2) * CONFIG.cameraZ;
+                        const visibleWidth = visibleHeight * camera.aspect;
+                        
+                        // Y轴位置保持在底部上方一点 (车高10，半高5，加点边距)
+                        const targetY = -visibleHeight/2 + 5 + 2; 
+
+                        // 计算目标X位置：回到中间 (x=0)
+                        const targetX = 0;
+
+                        // 状态判断：是否已到达目标位置
+                        if (carArrivalTime === 0) {
+                            // 还没到，继续往目标位置开
+                            // 进场速度再加快：从 0.04 提升到 0.08，让行驶时间缩短约 0.5s
+                            carMesh.position.x += (targetX - carMesh.position.x) * 0.08;
+                            carMesh.position.y = targetY; // 正常高度
+                            carMesh.rotation.z = 0;       // 正常角度
+                            
+                            // 判断是否足够接近目标 (例如距离小于 0.5)
+                            if (Math.abs(carMesh.position.x - targetX) < 0.5) {
+                                carMesh.position.x = targetX; // 强制吸附
+                                carArrivalTime = Date.now();  // 记录到达时间
+                            }
+                        } else {
+                            // 已经到达停留点，检查停留时间
+                            const stopElapsed = Date.now() - carArrivalTime;
+                            
+                            if (stopElapsed < 1000) {
+                                // 阶段1：静止停留 (0-1秒)
+                                carMesh.position.x = targetX;
+                                carMesh.position.y = targetY;
+                                carMesh.rotation.z = 0;
+                            } else if (stopElapsed < 1500) {
+                                // 阶段2：启动蓄力 (1-1.5秒) - 类似CSS3 ease-in-out 的起步动作
+                                // 动作：稍微后退 + 车头抬起 + 引擎震动
+                                const t = (stopElapsed - 1000) / 500; // 0 -> 1
+                                
+                                // 后退：平滑后移 (相对于停留点 targetX)
+                                const backUpDist = 1.5;
+                                carMesh.position.x = targetX - backUpDist * Math.sin(t * Math.PI / 2);
+                                
+                                // 抬头：车头微微抬起 (逆时针旋转，幅度减小 0.15 -> 0.08)
+                                carMesh.rotation.z = 0.08 * Math.sin(t * Math.PI / 2);
+                                
+                                // 震动：模拟引擎轰鸣 (幅度减小 0.3 -> 0.15)
+                                carMesh.position.y = targetY + (Math.random() - 0.5) * 0.15;
+                            } else {
+                                // 阶段3：弹射起步 (1.5秒后)
+                                // 加快离场速度
+                                const leaveTime = (stopElapsed - 1500) * 0.001; // 秒
+                                
+                                // 基础速度 0.3，加速度 0.2
+                                const speed = 0.3 + leaveTime * 0.2; 
+                                carMesh.position.x += speed;
+                                
+                                // 恢复高度
+                                carMesh.position.y = targetY;
+                                
+                                // 角度回正 (带一点惯性回弹效果)
+                                if (leaveTime < 0.5) {
+                                    // 0.5秒内从抬起状态回正 (幅度减小 0.15 -> 0.08)
+                                    carMesh.rotation.z = 0.08 * (1 - leaveTime * 2); 
+                                } else {
+                                    carMesh.rotation.z = 0;
+                                }
+                            }
+                        }
+                    } else {
+                        // 2秒内，保持在起点，不可见
+                        // 计算起点
+                        const vFOV = camera.fov * Math.PI / 180;
+                        const visibleHeight = 2 * Math.tan(vFOV / 2) * CONFIG.cameraZ;
+                        const visibleWidth = visibleHeight * camera.aspect;
+                        
+                        // 假设车宽约 20 (根据 height=10 和 aspect)
+                        // 起点：左下角屏幕外
+                        const startY = -visibleHeight/2 + 5 + 2;
+                        carMesh.position.set(-visibleWidth/2 - 30, startY, 5);
+                        carMesh.rotation.z = 0; // 重置旋转
+                        carMesh.visible = false;
+                        carArrivalTime = 0; // 重置到达状态
+                    }
+                } else {
+                    carMesh.visible = false;
+                    carArrivalTime = 0; // 重置到达状态
+                    if (carMesh) carMesh.rotation.z = 0; // 重置旋转
+                }
+            }
+
+            // 粒子组整体跟随拳头移动
+            // 使用较高的插值速度(0.4)以实现紧跟效果，响应更灵敏
+            if (particles) {
+                particles.position.y += (targetGroupY - particles.position.y) * 0.4;
+                particles.position.x += (targetGroupX - particles.position.x) * 0.4;
+            }
+
+            // LOVE模式：使用基于距离计算的缩放比例
+            if (lastGesture === 'LOVE') {
+                // 平滑过渡到目标缩放比例
+                currentLoveScale += (targetLoveScale - currentLoveScale) * 0.1;
+            } else {
+                currentLoveScale = 1.0;
+            }
+            
+            const breathe = (lastGesture === 'LOVE') 
+                            ? currentLoveScale 
+                            : Math.sin(time * 0.5) * 0.05 + 1.0;
+            
+            const floatY = Math.sin(time * 0.8) * 0.2;
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const idx = i * 3;
+                currentPositions[idx]   += (targetPositions[idx]   - currentPositions[idx])   * CONFIG.lerpSpeed;
+                currentPositions[idx+1] += (targetPositions[idx+1] - currentPositions[idx+1]) * CONFIG.lerpSpeed;
+                currentPositions[idx+2] += (targetPositions[idx+2] - currentPositions[idx+2]) * CONFIG.lerpSpeed;
+                currentColors[idx]   += (targetColors[idx]   - currentColors[idx])   * CONFIG.lerpSpeed;
+                currentColors[idx+1] += (targetColors[idx+1] - currentColors[idx+1]) * CONFIG.lerpSpeed;
+                currentColors[idx+2] += (targetColors[idx+2] - currentColors[idx+2]) * CONFIG.lerpSpeed;
+
+                pos[idx]     = currentPositions[idx] * breathe;
+                pos[idx+1]   = currentPositions[idx+1] * breathe + floatY;
+                pos[idx+2]   = currentPositions[idx+2] + Math.cos(time + i * 0.1) * 0.1;
+                colors[idx]   = currentColors[idx];
+                colors[idx+1] = currentColors[idx+1];
+                colors[idx+2] = currentColors[idx+2];
+            }
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        initThree(); initVision(); animate();
+    </script>
+</body>
+</html>
